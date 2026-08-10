@@ -388,13 +388,44 @@ function AuthCard({ email, onChangeEmail, password, onChangePassword, onSubmit, 
 
 function ProfileCard({ me, onSubmit, onSkip, status }: any) {
   const formRef = useRef<HTMLFormElement>(null);
+  const [username, setUsername] = useState(me?.username || '');
+  const [usernameStatus, setUsernameStatus] = useState<{ available: boolean | null; error: string | null }>({ available: null, error: null });
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    const val = username.replace(/^@/, '').trim();
+    if (!val || val === (me?.username || '')) { setUsernameStatus({ available: null, error: null }); return; }
+    setChecking(true);
+    const t = setTimeout(async () => {
+      try {
+        const r = await api('/api/users/check-username?username=' + encodeURIComponent(val));
+        setUsernameStatus({ available: r.available, error: r.error });
+      } catch { setUsernameStatus({ available: null, error: null }); }
+      setChecking(false);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [username]);
+
+  const usernameColor = checking ? '#888' : usernameStatus.available === true ? '#d4ff00' : usernameStatus.available === false ? '#ff3c00' : 'transparent';
+  const usernameMsg = checking ? 'Проверяем...' : usernameStatus.available === true ? '✓ Свободен' : usernameStatus.error || '';
+
   return (
     <form ref={formRef} className="profile-grid" onSubmit={(e) => { e.preventDefault(); onSubmit(new FormData(formRef.current!)); }}>
       <div className="card-title">Создайте профиль</div>
       <p>Заполните данные чтобы начать общение.</p>
       <label className="upload"><input name="avatar" type="file" accept="image/*" /><span>Аватар</span></label>
       <input className="input" name="displayName" placeholder="Имя" defaultValue={me?.displayName || ''} />
-      <input className="input" name="username" placeholder="@username" defaultValue={me?.username || ''} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <input
+          className="input"
+          name="username"
+          placeholder="@username"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
+          style={{ borderColor: usernameStatus.available === true ? '#d4ff00' : usernameStatus.available === false ? '#ff3c00' : undefined }}
+        />
+        {usernameMsg && <div style={{ fontSize: 11, color: usernameColor, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{usernameMsg}</div>}
+      </div>
       <textarea className="input textarea" name="bio" placeholder="О себе" defaultValue={me?.bio || ''} />
       <button className="primary" type="submit">СОХРАНИТЬ</button>
       <button className="ghost" type="button" onClick={onSkip}>Пропустить</button>

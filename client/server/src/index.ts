@@ -13,8 +13,16 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { authCookie, clearAuthCookie, createToken, hashCode, newVerificationCode, requireAuth, verifyToken } from './auth.js';
-import { loadDb, saveDb, withDb } from './db.js';
 import { mailEnabled, sendVerificationEmail } from './mailer.js';
+import {
+  initDb,
+  findUserByEmail, findUserByUsername, findUserById, isUsernameTaken, createUser, updateUser, searchUsers,
+  getVerificationCode, upsertVerificationCode, incrementVerificationAttempts, deleteVerificationCode,
+  createSession as dbCreateSession, getActiveSessions, getSession, revokeSession, revokeOtherSessions,
+  findChat, createChat, getUserChats, isChatMember,
+  getChatMessages, createMessage,
+  getFavorites, createFavorite, deleteFavorite
+} from './db.js';
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3001);
 const APP_ORIGIN = (process.env.APP_ORIGIN || 'http://localhost:5173').trim().replace(/\/$/, '');
@@ -52,9 +60,15 @@ const profileSchema = z.object({
   bio: z.string().trim().max(160).optional()
 });
 
-function now() { return new Date().toISOString(); }
+function nowStr() { return new Date().toISOString(); }
 function uid(prefix: string) { return `${prefix}_${nanoid(12)}`; }
-function publicUser(row: any) { return row ? ({ id: row.id, email: row.email, emailVerified: row.emailVerified, username: row.username, displayName: row.displayName, avatar: row.avatar, bio: row.bio, hasPassword: !!row.passwordHash, createdAt: row.createdAt, updatedAt: row.updatedAt }) : null; }
+function publicUser(row: any) {
+  return row ? ({
+    id: row.id, email: row.email, emailVerified: row.emailVerified,
+    username: row.username, displayName: row.displayName, avatar: row.avatar,
+    bio: row.bio, hasPassword: !!row.passwordHash, createdAt: row.createdAt, updatedAt: row.updatedAt
+  }) : null;
+}
 
 function parseDevice(ua: string) {
   const s = ua || '';
@@ -73,135 +87,35 @@ function parseDevice(ua: string) {
   return browser ? `${device} · ${browser}` : device;
 }
 
-function createSession(req: any, userId: string) {
-  return withDb(db => {
-    const session = {
-      id: uid('sess'),
-      userId,
-      device: parseDevice(req.headers['user-agent'] || ''),
-      userAgent: req.headers['user-agent'] || '',
-      ip: req.ip,
-      createdAt: now(),
-      lastSeenAt: now(),
-      revokedAt: null as string | null
-    };
-    db.sessions.push(session);
-    return session;
-  });
+async function makeSession(req: any, userId: string) {
+  const session = {
+    id: uid('sess'),
+    userId,
+    device: parseDevice(req.headers['user-agent'] || ''),
+    userAgent: req.headers['user-agent'] || '',
+    ip: req.ip,
+    createdAt: nowStr(),
+    lastSeenAt: nowStr()
+  };
+  await dbCreateSession(session);
+  return session;
 }
 
-// Reserved usernames that cannot be taken by any user
-const RESERVED_USERNAMES = new Set(['admin', 'support', 'help', 'root', 'system', 'moderator', 'glassmessenger']);
-
-function isUsernameTaken(normalizedUsername: string, excludeUserId?: string) {
-  const lower = normalizedUsername.toLowerCase();
-  if (RESERVED_USERNAMES.has(lower)) return true;
-  const db = loadDb();
-  return db.users.some(u => u.id !== excludeUserId && (u.username || '').toLowerCase() === lower);
-}
-
-function getCurrentUser(req: any) {
-  const db = loadDb();
-  return db.users.find(u => u.id === req.userId) || null;
-}
-
-function findUserByEmail(email: string) {
-  const db = loadDb();
-  return db.users.find(u => u.email === email.toLowerCase()) || null;
-}
-
-function findUserByUsername(username: string) {
-  const lower = username.toLowerCase();
-  const db = loadDb();
-  return db.users.find(u => (u.username || '').toLowerCase() === lower) || null;
-}
-
-function ensureChat(userId: string, otherId: string) {
-  return withDb(db => {
-    const existing = db.chats.find(chat => {
-      const members = db.chat_members.filter(m => m.chatId === chat.id).map(m => m.userId);
-      return members.includes(userId) && members.includes(otherId);
-    });
-    if (existing) return existing.id;
-    const chatId = uid('chat');
-    db.chats.push({ id: chatId, createdAt: now() });
-    db.chat_members.push({ chatId, userId }, { chatId, userId: otherId });
-    return chatId;
-  });
-}
-
-function getChatMessages(chatId: string) {
-  return loadDb().messages.filter(m => m.chatId === chatId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-}
-
-app.post('/api/auth/start-register', rateLimit({ windowMs: 60_000, limit: 8 }), async (req, res) => {
-  try {
-    const { email } = z.object({ email: emailSchema }).parse(req.body);
-    const normalized = email.toLowerCase();
-    if (findUserByEmail(normalized)?.emailVerified) return res.status(409).json({ error: 'Email already registered' });
-    const db = loadDb();
-    const recent = db.verification_codes.filter(v => v.email === normalized).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    if (recent && Date.now() - new Date(recent.lastSentAt).getTime() < COOLDOWN * 1000) return res.status(429).json({ error: 'Please wait before requesting a new code' });
-    const code = newVerificationCode();
-    const record = { id: uid('vc'), email: normalized, codeHash: hashCode(code), expiresAt: new Date(Date.now() + TTL_MINUTES * 60 * 1000).toISOString(), attempts: 0, createdAt: now(), lastSentAt: now() };
-    db.verification_codes = db.verification_codes.filter(v => v.email !== normalized);
-    db.verification_codes.push(record);
-    saveDb(db);
-    await sendVerificationEmail(normalized, code);
-    res.json({ ok: true, mailEnabled });
-  } catch (error: any) {
-    res.status(400).json({ error: error?.message || 'Invalid email' });
-  }
-});
-
-app.post('/api/auth/verify-code', rateLimit({ windowMs: 60_000, limit: 12 }), (req, res) => {
-  try {
-    const { email, code } = z.object({ email: emailSchema, code: z.string().regex(/^\d{6}$/) }).parse(req.body);
-    const normalized = email.toLowerCase();
-    const db = loadDb();
-    const row = db.verification_codes.filter(v => v.email === normalized).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    if (!row) return res.status(400).json({ error: 'No verification code found' });
-    if (row.attempts >= MAX_ATTEMPTS) return res.status(429).json({ error: 'Too many attempts. Request a new code.' });
-    if (new Date(row.expiresAt).getTime() < Date.now()) return res.status(400).json({ error: 'Code expired. Request a new one.' });
-    row.attempts += 1;
-    saveDb(db);
-    if (row.codeHash !== hashCode(code)) return res.status(400).json({ error: 'Invalid code' });
-    const existing = findUserByEmail(normalized);
-    const user = withDb(db2 => {
-      const created = existing || { id: uid('user'), email: normalized, emailVerified: 1, username: null, displayName: null, avatar: null, bio: null, passwordHash: null, createdAt: now(), updatedAt: now() };
-      if (!existing) db2.users.push(created);
-      else Object.assign(existing, { emailVerified: 1, updatedAt: now() });
-      db2.verification_codes = db2.verification_codes.filter(v => v.email !== normalized);
-      return existing || created;
-    });
-    const session = createSession(req, user.id);
-    const token = createToken(user.id, session.id);
-    authCookie(res, token);
-    res.json({ ok: true, user: publicUser(user) });
-  } catch (error: any) {
-    res.status(400).json({ error: error?.message || 'Invalid code' });
-  }
-});
+// ── AUTH ───────────────────────────────────────────────────────────────────
 
 app.post('/api/auth/email-login', rateLimit({ windowMs: 60_000, limit: 10 }), async (req, res) => {
   try {
     const { email, password } = z.object({ email: emailSchema, password: z.string().min(8).max(72) }).parse(req.body);
     const normalized = email.toLowerCase();
-    let user = findUserByEmail(normalized);
+    let user = await findUserByEmail(normalized) as any;
     if (!user) {
       const passwordHash = await bcrypt.hash(password, 10);
-      user = withDb(db => {
-        const created = { id: uid('user'), email: normalized, emailVerified: 1, username: null, displayName: null, avatar: null, bio: null, passwordHash, createdAt: now(), updatedAt: now() };
-        db.users.push(created);
-        return created;
-      });
+      user = await createUser({ id: uid('user'), email: normalized, passwordHash, createdAt: nowStr(), updatedAt: nowStr() });
     } else if (user.passwordHash) {
       const valid = await bcrypt.compare(password, user.passwordHash);
       if (!valid) return res.status(401).json({ error: 'Неверный пароль' });
     }
-    // Legacy accounts without a password yet are allowed to log in with any
-    // input here; they'll be prompted to attach a real password in the profile.
-    const session = createSession(req, user.id);
+    const session = await makeSession(req, user.id);
     const token = createToken(user.id, session.id);
     authCookie(res, token);
     res.json({ ok: true, user: publicUser(user) });
@@ -212,189 +126,176 @@ app.post('/api/auth/email-login', rateLimit({ windowMs: 60_000, limit: 10 }), as
 
 app.post('/api/auth/set-password', requireAuth, async (req, res) => {
   try {
-    const me = getCurrentUser(req as any);
+    const me = await findUserById((req as any).userId) as any;
     if (me.passwordHash) return res.status(409).json({ error: 'Пароль уже задан, изменить его нельзя' });
     const { password } = z.object({ password: z.string().min(8).max(72) }).parse(req.body);
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = withDb(db => {
-      const row = db.users.find(u => u.id === me.id);
-      Object.assign(row, { passwordHash, updatedAt: now() });
-      return row;
-    });
+    const user = await updateUser(me.id, { passwordHash, updatedAt: nowStr() });
     res.json({ user: publicUser(user) });
   } catch (error: any) {
     res.status(400).json({ error: error?.message || 'Не удалось сохранить пароль' });
   }
 });
 
-app.post('/api/auth/login', rateLimit({ windowMs: 60_000, limit: 10 }), (req, res) => {
-  try {
-    const { email } = z.object({ email: emailSchema }).parse(req.body);
-    const user = findUserByEmail(email.toLowerCase());
-    if (!user?.emailVerified) return res.status(400).json({ error: 'Email not verified' });
-    const session = createSession(req, user.id);
-    const token = createToken(user.id, session.id);
-    authCookie(res, token);
-    res.json({ ok: true, user: publicUser(user) });
-  } catch (error: any) {
-    res.status(400).json({ error: error?.message || 'Invalid request' });
-  }
-});
-
-app.post('/api/auth/logout', requireAuth, (req, res) => {
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
   const sessionId = (req as any).sessionId;
-  if (sessionId) withDb(db => { const s = db.sessions.find(x => x.id === sessionId); if (s) s.revokedAt = now(); });
+  if (sessionId) await revokeSession(sessionId, (req as any).userId, nowStr());
   clearAuthCookie(res);
   res.json({ ok: true });
 });
-app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: publicUser(getCurrentUser(req as any)) }));
 
-app.get('/api/auth/sessions', requireAuth, (req, res) => {
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  const user = await findUserById((req as any).userId);
+  res.json({ user: publicUser(user) });
+});
+
+app.get('/api/auth/sessions', requireAuth, async (req, res) => {
   const me = (req as any).userId;
   const currentSessionId = (req as any).sessionId;
-  const sessions = loadDb().sessions
-    .filter(s => s.userId === me && !s.revokedAt)
-    .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-    .map(s => ({ id: s.id, device: s.device, ip: s.ip, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, current: s.id === currentSessionId }));
+  const sessions = (await getActiveSessions(me)).map((s: any) => ({
+    id: s.id, device: s.device, ip: s.ip, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, current: s.id === currentSessionId
+  }));
   res.json({ sessions });
 });
 
-app.post('/api/auth/sessions/:id/revoke', requireAuth, (req, res) => {
+app.post('/api/auth/sessions/:id/revoke', requireAuth, async (req, res) => {
   const me = (req as any).userId;
-  const targetId = String(req.params.id);
-  const db = loadDb();
-  const session = db.sessions.find(s => s.id === targetId && s.userId === me);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
-  session.revokedAt = now();
-  saveDb(db);
+  const session = await getSession(String(req.params.id));
+  if (!session || session.userId !== me) return res.status(404).json({ error: 'Session not found' });
+  await revokeSession(String(req.params.id), me, nowStr());
   res.json({ ok: true });
 });
 
-app.post('/api/auth/sessions/revoke-others', requireAuth, (req, res) => {
-  const me = (req as any).userId;
-  const currentSessionId = (req as any).sessionId;
-  const db = loadDb();
-  db.sessions.filter(s => s.userId === me && s.id !== currentSessionId && !s.revokedAt).forEach(s => { s.revokedAt = now(); });
-  saveDb(db);
+app.post('/api/auth/sessions/revoke-others', requireAuth, async (req, res) => {
+  await revokeOtherSessions((req as any).userId, (req as any).sessionId, nowStr());
   res.json({ ok: true });
 });
 
-app.get('/api/users/search', requireAuth, (req, res) => {
-  const q = String(req.query.q || '').trim().replace(/^@/, '').toLowerCase();
+// ── USERS ──────────────────────────────────────────────────────────────────
+
+app.get('/api/users/check-username', requireAuth, async (req, res) => {
+  const raw = String(req.query.username || '').trim().replace(/^@/, '');
+  if (!raw) return res.json({ available: false, error: 'Введите username' });
+  const parsed = usernameSchema.safeParse(raw);
+  if (!parsed.success) return res.json({ available: false, error: 'Только латиница, цифры и _ (3–24 символа)' });
+  const taken = await isUsernameTaken(raw, (req as any).userId);
+  res.json({ available: !taken, error: taken ? 'Уже занят' : null });
+});
+
+app.get('/api/users/search', requireAuth, async (req, res) => {
+  const q = String(req.query.q || '').trim().replace(/^@/, '');
   if (!q) return res.json({ users: [] });
-  const users = loadDb().users.filter(u => u.emailVerified && ((u.username || '').toLowerCase().includes(q) || (u.displayName || '').toLowerCase().includes(q))).slice(0, 20).map(publicUser);
+  const users = (await searchUsers(q)).map(publicUser);
   res.json({ users });
 });
 
-app.get('/api/users/:username', requireAuth, (req, res) => {
-  const username = String(req.params.username).replace(/^@/, '');
-  const user = findUserByUsername(username);
+app.get('/api/users/:username', requireAuth, async (req, res) => {
+  const user = await findUserByUsername(String(req.params.username).replace(/^@/, ''));
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user: publicUser(user) });
 });
 
-app.put('/api/profile', requireAuth, avatars.single('avatar'), (req, res) => {
+// ── PROFILE ────────────────────────────────────────────────────────────────
+
+app.put('/api/profile', requireAuth, avatars.single('avatar'), async (req, res) => {
   try {
-    const me = getCurrentUser(req as any);
+    const me = await findUserById((req as any).userId) as any;
     const body = profileSchema.parse({
       displayName: typeof req.body.displayName === 'string' ? req.body.displayName : undefined,
       username: typeof req.body.username === 'string' ? req.body.username : undefined,
       bio: typeof req.body.bio === 'string' ? req.body.bio : undefined
     });
     const normalizedUsername = body.username?.replace(/^@/, '');
-    if (normalizedUsername && isUsernameTaken(normalizedUsername, me.id)) return res.status(409).json({ error: 'Этот username уже занят' });
-    const db = loadDb();
-    let avatar = me.avatar;
-    if (req.file) avatar = `/uploads/${req.file.filename}`;
-    const user = db.users.find(u => u.id === me.id);
-    Object.assign(user, { displayName: body.displayName ?? user.displayName, username: normalizedUsername ?? user.username, bio: body.bio ?? user.bio, avatar, updatedAt: now() });
-    saveDb(db);
+    if (normalizedUsername && await isUsernameTaken(normalizedUsername, me.id)) {
+      return res.status(409).json({ error: 'Этот username уже занят' });
+    }
+    const avatar = req.file ? `/uploads/${req.file.filename}` : me.avatar;
+    const fields: Record<string, any> = { updatedAt: nowStr() };
+    if (body.displayName !== undefined) fields.displayName = body.displayName;
+    if (normalizedUsername !== undefined) fields.username = normalizedUsername;
+    if (body.bio !== undefined) fields.bio = body.bio;
+    if (avatar !== me.avatar) fields.avatar = avatar;
+    if (!me.emailVerified) fields.emailVerified = 1;
+    const user = await updateUser(me.id, fields);
     res.json({ user: publicUser(user) });
   } catch (error: any) {
     res.status(400).json({ error: error?.message || 'Invalid profile' });
   }
 });
 
-app.get('/api/favorites', requireAuth, (req, res) => {
-  const me = (req as any).userId;
-  const items = loadDb().favorites.filter(f => f.userId === me).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+// ── FAVORITES ──────────────────────────────────────────────────────────────
+
+app.get('/api/favorites', requireAuth, async (req, res) => {
+  const items = await getFavorites((req as any).userId);
   res.json({ items });
 });
 
-app.post('/api/favorites', requireAuth, (req, res) => {
-  const me = (req as any).userId;
+app.post('/api/favorites', requireAuth, async (req, res) => {
   const body = z.object({ text: z.string().trim().min(1).max(4000) }).parse({ text: typeof req.body.text === 'string' ? req.body.text : '' });
-  const item = withDb(db => {
-    const created = { id: uid('fav'), userId: me, text: body.text, createdAt: now(), updatedAt: now() };
-    db.favorites.push(created);
-    return created;
-  });
+  const item = await createFavorite({ id: uid('fav'), userId: (req as any).userId, text: body.text, createdAt: nowStr(), updatedAt: nowStr() });
   res.json({ item });
 });
 
-app.delete('/api/favorites/:id', requireAuth, (req, res) => {
-  const me = (req as any).userId;
-  const targetId = String(req.params.id);
-  const db = loadDb();
-  const before = db.favorites.length;
-  db.favorites = db.favorites.filter(f => !(f.id === targetId && f.userId === me));
-  if (db.favorites.length === before) return res.status(404).json({ error: 'Not found' });
-  saveDb(db);
+app.delete('/api/favorites/:id', requireAuth, async (req, res) => {
+  const found = await deleteFavorite(String(req.params.id), (req as any).userId);
+  if (!found) return res.status(404).json({ error: 'Not found' });
   res.json({ ok: true });
 });
 
-app.post('/api/chats/open', requireAuth, (req, res) => {
+// ── CHATS ──────────────────────────────────────────────────────────────────
+
+app.post('/api/chats/open', requireAuth, async (req, res) => {
   const { username } = z.object({ username: z.string().trim().min(1) }).parse(req.body);
-  const me = getCurrentUser(req as any);
-  const other = findUserByUsername(username.replace(/^@/, ''));
+  const me = await findUserById((req as any).userId) as any;
+  const other = await findUserByUsername(username.replace(/^@/, '')) as any;
   if (!other) return res.status(404).json({ error: 'User not found' });
-  const chatId = ensureChat(me.id, other.id);
-  res.json({ chatId, other: publicUser(other), messages: getChatMessages(chatId) });
+  let chatId = await findChat(me.id, other.id);
+  if (!chatId) {
+    chatId = uid('chat');
+    await createChat(chatId, me.id, other.id, nowStr());
+  }
+  const messages = await getChatMessages(chatId);
+  res.json({ chatId, other: publicUser(other), messages });
 });
 
-app.get('/api/chats', requireAuth, (req, res) => {
-  const me = getCurrentUser(req as any);
-  const db = loadDb();
-  const chats = db.chats
-    .filter(c => db.chat_members.some(m => m.chatId === c.id && m.userId === me.id))
-    .map(chat => {
-      const members = db.chat_members.filter(m => m.chatId === chat.id).map(m => m.userId);
-      const otherId = members.find(id => id !== me.id) || me.id;
-      const other = db.users.find(u => u.id === otherId);
-      const last = db.messages.filter(m => m.chatId === chat.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-      return { id: chat.id, createdAt: chat.createdAt, otherName: other?.displayName || other?.username || 'Private chat', otherUsername: other?.username || null, lastMessage: last?.text || '', lastAt: last?.createdAt || chat.createdAt };
-    })
-    .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+app.get('/api/chats', requireAuth, async (req, res) => {
+  const me = (req as any).userId;
+  const rows = await getUserChats(me);
+  const chats = await Promise.all(rows.map(async (row: any) => {
+    const other = row.otherId ? await findUserById(row.otherId) as any : null;
+    return {
+      id: row.id,
+      createdAt: row.createdAt,
+      otherName: other?.displayName || other?.username || 'Private chat',
+      otherUsername: other?.username || null,
+      lastMessage: row.lastMessage || '',
+      lastAt: row.lastAt || row.createdAt
+    };
+  }));
   res.json({ chats });
 });
 
-app.get('/api/chats/:chatId/messages', requireAuth, (req, res) => {
-  const me = getCurrentUser(req as any);
-  const db = loadDb();
+app.get('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
   const chatId = String(req.params.chatId);
-  if (!db.chat_members.some(m => m.chatId === chatId && m.userId === me.id)) return res.status(403).json({ error: 'Forbidden' });
-  res.json({ messages: getChatMessages(chatId) });
+  if (!await isChatMember(chatId, (req as any).userId)) return res.status(403).json({ error: 'Forbidden' });
+  res.json({ messages: await getChatMessages(chatId) });
 });
 
-app.post('/api/chats/:chatId/messages', requireAuth, (req, res) => {
-  const me = getCurrentUser(req as any);
+app.post('/api/chats/:chatId/messages', requireAuth, async (req, res) => {
   const chatId = String(req.params.chatId);
-  const body = z.object({ text: z.string().trim().min(1).max(4000) }).parse({
-    text: typeof req.body.text === 'string' ? req.body.text : ''
-  });
-  const db = loadDb();
-  if (!db.chat_members.some(m => m.chatId === chatId && m.userId === me.id)) return res.status(403).json({ error: 'Forbidden' });
-  const message = { id: uid('msg'), chatId, senderId: me.id, text: body.text, createdAt: now(), updatedAt: now() };
-  db.messages.push(message);
-  saveDb(db);
+  const body = z.object({ text: z.string().trim().min(1).max(4000) }).parse({ text: typeof req.body.text === 'string' ? req.body.text : '' });
+  if (!await isChatMember(chatId, (req as any).userId)) return res.status(403).json({ error: 'Forbidden' });
+  const message = { id: uid('msg'), chatId, senderId: (req as any).userId, text: body.text, createdAt: nowStr(), updatedAt: nowStr() };
+  await createMessage(message);
   io.to(chatId).emit('message:new', message);
   res.json({ message });
 });
 
+// ── STATIC + SOCKET ────────────────────────────────────────────────────────
+
 const DIST = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../dist');
 app.use(express.static(DIST));
 app.get('/{*path}', (_req, res) => res.sendFile(path.join(DIST, 'index.html')));
-
 app.use((err: any, _req: any, res: any, _next: any) => res.status(500).json({ error: err?.message || 'Server error' }));
 
 io.on('connection', socket => {
@@ -408,4 +309,9 @@ io.on('connection', socket => {
   }
 });
 
-server.listen(PORT, () => console.log(`${APP_NAME} running on http://localhost:${PORT}`));
+initDb().then(() => {
+  server.listen(PORT, () => console.log(`${APP_NAME} running on http://localhost:${PORT}`));
+}).catch(err => {
+  console.error('Failed to init DB:', err);
+  process.exit(1);
+});
