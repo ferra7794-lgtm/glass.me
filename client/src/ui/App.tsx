@@ -177,16 +177,17 @@ export function App() {
   };
 
   const chatOpen = step === 'messenger' && !!currentChat.chatId;
+  const sidebarVisible = step === 'messenger' && !chatOpen;
 
   return (
-    <div className="app-shell">
+    <div className={'app-shell' + (isAuthed ? ' has-nav' : '')}>
       <div className="bg-orb orb-a" /><div className="bg-orb orb-b" />
       <header className="topbar glass">
         <div className="brand"><div className="brand-mark">GM</div><div><h1>Glass Messenger</h1><p>Приватный мессенджер в реальном времени</p></div></div>
         <button className="ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Светлая' : 'Тёмная'} тема</button>
       </header>
-      <main className={'layout' + (chatOpen ? ' chat-open' : '')}>
-        {step === 'messenger' && !chatOpen && (
+      <main className={'layout' + (!sidebarVisible ? ' chat-open' : '')}>
+        {sidebarVisible && (
           <section className="sidebar glass">
             <div className="section-title">Поиск</div>
             <input className="input" placeholder="Поиск по @username или имени" value={search} onChange={e => setSearch(e.target.value)} />
@@ -208,7 +209,7 @@ export function App() {
             </div>
           </section>
         )}
-        <section className={'workspace glass' + (chatOpen ? ' workspace-full' : '')}>
+        <section className={'workspace glass' + (chatOpen || step === 'favorites' ? ' workspace-full' : '')}>
           {step === 'register' && <AuthCard email={email} onChangeEmail={setEmail} password={password} onChangePassword={setPassword} onSubmit={submitEmail} hint={status} />}
           {step === 'profile' && <ProfileCard me={me} onSubmit={saveProfile} onSkip={() => setStep('messenger')} status={status} />}
           {step === 'messenger' && <Messenger me={me} currentChat={currentChat} message={message} setMessage={setMessage} onSend={sendMessage} onBack={closeChat} chatOpen={chatOpen} />}
@@ -244,7 +245,7 @@ export function App() {
       {isAuthed && (
         <footer className="bottom-nav glass">
           <button className={'bottom-tab' + (step === 'account' ? ' active' : '')} onClick={() => setStep('account')}>Профиль</button>
-          <button className={'bottom-tab' + (step === 'messenger' ? ' active' : '')} onClick={() => setStep('messenger')}>Чаты</button>
+          <button className={'bottom-tab' + (step === 'messenger' ? ' active' : '')} onClick={() => { closeChat(); setStep('messenger'); }}>Чаты</button>
           <button className={'bottom-tab' + (step === 'favorites' ? ' active' : '')} onClick={() => setStep('favorites')}>Избранное</button>
         </footer>
       )}
@@ -350,19 +351,23 @@ function FavoritesCard({ favorites, draft, setDraft, onAdd, onRemove, onOpenProf
     return () => window.removeEventListener('open-profile', handler);
   }, [onOpenProfile]);
   return (
-    <div className="center-card favorites-card">
-      <div className="card-title">Избранное</div>
-      <p>Заметки, ссылки и мысли. Упоминания вида @username превращаются в ссылку на профиль.</p>
-      <textarea className="input textarea" placeholder="Например: @alex — договориться о встрече" value={draft} onChange={e => setDraft(e.target.value)} />
-      <button className="primary" onClick={onAdd}>Добавить в избранное</button>
-      <div className="search-list favorites-list">
-        {favorites.length === 0 && <p>Пока пусто</p>}
+    <div className="messenger favorites-messenger">
+      <div className="chat-header">
+        <div className="avatar large">★</div>
+        <div><strong>Избранное</strong><small>Заметки и ссылки. @username превращается в ссылку на профиль</small></div>
+      </div>
+      <div className="messages favorites-messages">
+        {favorites.length === 0 && <p>Пока пусто. Добавьте первую заметку ниже.</p>}
         {favorites.map((f: Favorite) => (
-          <div key={f.id} className="favorite-item">
+          <div key={f.id} className="bubble favorite-bubble">
             <p><LinkedText text={f.text} /></p>
             <button className="ghost small" onClick={() => onRemove(f.id)}>Удалить</button>
           </div>
         ))}
+      </div>
+      <div className="composer">
+        <textarea className="input textarea" value={draft} onChange={e => setDraft(e.target.value)} placeholder="Например: @alex — договориться о встрече. Enter — сохранить, Shift+Enter — новая строка." onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onAdd(); } }} />
+        <button className="primary" onClick={onAdd}>Добавить</button>
       </div>
     </div>
   );
@@ -401,16 +406,20 @@ function ProfileCard({ me, onSubmit, onSkip, status }: any) {
 function Messenger({ me, currentChat, message, setMessage, onSend, onBack, chatOpen }: any) {
   return (
     <div className="messenger">
-      <div className="chat-header">
-        {chatOpen && <button className="ghost back-btn" onClick={onBack}>← Назад</button>}
-        <div className="avatar large">{currentChat.other?.avatar ? <img src={currentChat.other.avatar} alt="" /> : (currentChat.other?.displayName?.[0] || '?')}</div>
-        <div><strong>{currentChat.other?.displayName || 'Выберите чат'}</strong><small>@{currentChat.other?.username || 'найдите пользователя в поиске'}</small></div>
-      </div>
+      {chatOpen && (
+        <div className="chat-header">
+          <button className="ghost back-btn" onClick={onBack}>← Назад</button>
+          <div className="avatar large">{currentChat.other?.avatar ? <img src={currentChat.other.avatar} alt="" /> : (currentChat.other?.displayName?.[0] || '?')}</div>
+          <div><strong>{currentChat.other?.displayName || currentChat.other?.username || '—'}</strong><small>@{currentChat.other?.username || ''}</small></div>
+        </div>
+      )}
       <div className="messages">{currentChat.messages.map((m: Message) => <div key={m.id} className={'bubble' + (m.senderId === me?.id ? ' mine' : '')}>{m.text}</div>)}</div>
-      <div className="composer">
-        <textarea className="input textarea" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Написать сообщение. Enter — отправить, Shift+Enter — новая строка." onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); } }} />
-        <button className="primary" onClick={onSend}>Отправить</button>
-      </div>
+      {chatOpen && (
+        <div className="composer">
+          <textarea className="input textarea" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Написать сообщение. Enter — отправить, Shift+Enter — новая строка." onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); } }} />
+          <button className="primary" onClick={onSend}>Отправить</button>
+        </div>
+      )}
     </div>
   );
 }
