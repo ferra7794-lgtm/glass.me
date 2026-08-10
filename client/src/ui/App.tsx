@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
-type User = { id: string; email: string; emailVerified: number; username: string | null; displayName: string | null; avatar: string | null; bio: string | null; createdAt: string; updatedAt: string };
+type User = { id: string; email: string; emailVerified: number; username: string | null; displayName: string | null; avatar: string | null; bio: string | null; hasPassword?: boolean; createdAt: string; updatedAt: string };
 type Message = { id: string; chatId: string; senderId: string; text: string; createdAt: string; updatedAt: string };
 type Session = { id: string; device: string; ip: string; createdAt: string; lastSeenAt: string; current: boolean };
 type Favorite = { id: string; text: string; createdAt: string; updatedAt: string };
@@ -19,6 +19,7 @@ export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem(themeKey) as any) || 'dark');
   const [me, setMe] = useState<User | null>(null);
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [step, setStep] = useState<'register' | 'profile' | 'messenger' | 'account' | 'favorites'>('register');
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
@@ -33,6 +34,10 @@ export function App() {
   const isAuthed = !!me;
   const [viewedProfile, setViewedProfile] = useState<User | null>(null);
   const [viewedProfileError, setViewedProfileError] = useState('');
+
+  const [setPasswordDraft, setSetPasswordDraft] = useState('');
+  const [setPasswordConfirm, setSetPasswordConfirm] = useState('');
+  const [setPasswordStatus, setSetPasswordStatus] = useState('');
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem(themeKey, theme); }, [theme]);
   useEffect(() => { api('/api/auth/me').then(r => { setMe(r.user); setStep(r.user?.username ? 'messenger' : 'profile'); }).catch(() => null); }, []);
@@ -61,10 +66,10 @@ export function App() {
   };
 
   const submitEmail = async () => {
-    if (!email.trim()) return;
+    if (!email.trim() || password.length < 8) return;
     try {
       setStatus('Входим...');
-      const r = await api('/api/auth/email-login', { method: 'POST', body: JSON.stringify({ email }) });
+      const r = await api('/api/auth/email-login', { method: 'POST', body: JSON.stringify({ email, password }) });
       setMe(r.user);
       setStep(r.user?.username ? 'messenger' : 'profile');
       setStatus('');
@@ -133,6 +138,21 @@ export function App() {
     }
   };
 
+  const setAccountPassword = async () => {
+    setSetPasswordStatus('');
+    if (setPasswordDraft.length < 8) { setSetPasswordStatus('Минимум 8 символов'); return; }
+    if (setPasswordDraft !== setPasswordConfirm) { setSetPasswordStatus('Пароли не совпадают'); return; }
+    try {
+      const r = await api('/api/auth/set-password', { method: 'POST', body: JSON.stringify({ password: setPasswordDraft }) });
+      setMe(r.user);
+      setSetPasswordDraft('');
+      setSetPasswordConfirm('');
+      setSetPasswordStatus('');
+    } catch (error: any) {
+      setSetPasswordStatus(error?.message || 'Ошибка');
+    }
+  };
+
   const openProfileByUsername = async (username: string) => {
     setViewedProfileError('');
     try {
@@ -144,6 +164,8 @@ export function App() {
     }
   };
 
+  const closeChat = () => setCurrentChat({ chatId: '', other: null, messages: [] });
+
   const sendMessage = async () => {
     if (!currentChat.chatId || !message.trim()) return;
     try {
@@ -154,6 +176,8 @@ export function App() {
     }
   };
 
+  const chatOpen = step === 'messenger' && !!currentChat.chatId;
+
   return (
     <div className="app-shell">
       <div className="bg-orb orb-a" /><div className="bg-orb orb-b" />
@@ -161,8 +185,8 @@ export function App() {
         <div className="brand"><div className="brand-mark">GM</div><div><h1>Glass Messenger</h1><p>Приватный мессенджер в реальном времени</p></div></div>
         <button className="ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Светлая' : 'Тёмная'} тема</button>
       </header>
-      <main className="layout">
-        {step === 'messenger' && (
+      <main className={'layout' + (chatOpen ? ' chat-open' : '')}>
+        {step === 'messenger' && !chatOpen && (
           <section className="sidebar glass">
             <div className="section-title">Поиск</div>
             <input className="input" placeholder="Поиск по @username или имени" value={search} onChange={e => setSearch(e.target.value)} />
@@ -184,10 +208,10 @@ export function App() {
             </div>
           </section>
         )}
-        <section className="workspace glass">
-          {step === 'register' && <AuthCard email={email} onChange={setEmail} onSubmit={submitEmail} hint={status} />}
+        <section className={'workspace glass' + (chatOpen ? ' workspace-full' : '')}>
+          {step === 'register' && <AuthCard email={email} onChangeEmail={setEmail} password={password} onChangePassword={setPassword} onSubmit={submitEmail} hint={status} />}
           {step === 'profile' && <ProfileCard me={me} onSubmit={saveProfile} onSkip={() => setStep('messenger')} status={status} />}
-          {step === 'messenger' && <Messenger me={me} currentChat={currentChat} message={message} setMessage={setMessage} onSend={sendMessage} />}
+          {step === 'messenger' && <Messenger me={me} currentChat={currentChat} message={message} setMessage={setMessage} onSend={sendMessage} onBack={closeChat} chatOpen={chatOpen} />}
           {step === 'account' && (
             <AccountCard
               me={me}
@@ -197,6 +221,12 @@ export function App() {
               onRevokeOthers={revokeOtherSessions}
               onEditProfile={() => setStep('profile')}
               status={status}
+              setPasswordDraft={setPasswordDraft}
+              setSetPasswordDraft={setSetPasswordDraft}
+              setPasswordConfirm={setPasswordConfirm}
+              setSetPasswordConfirm={setSetPasswordConfirm}
+              onSetPassword={setAccountPassword}
+              setPasswordStatus={setPasswordStatus}
             />
           )}
           {step === 'favorites' && (
@@ -223,7 +253,7 @@ export function App() {
           <div className="modal-card glass" onClick={e => e.stopPropagation()}>
             {viewedProfile ? (
               <>
-                <div className="avatar large">{viewedProfile.avatar ? <img src={viewedProfile.avatar} alt="" /> : (viewedProfile.displayName?.[0] || viewedProfile.username?.[0] || '?').toUpperCase()}</div>
+                <div className="avatar xlarge">{viewedProfile.avatar ? <img src={viewedProfile.avatar} alt="" /> : (viewedProfile.displayName?.[0] || viewedProfile.username?.[0] || '?').toUpperCase()}</div>
                 <div className="card-title">{viewedProfile.displayName || viewedProfile.username}</div>
                 <p>@{viewedProfile.username}</p>
                 {viewedProfile.bio && <p>{viewedProfile.bio}</p>}
@@ -271,14 +301,25 @@ function LinkedText({ text }: { text: string }) {
   );
 }
 
-function AccountCard({ me, sessions, onLogout, onRevoke, onRevokeOthers, onEditProfile, status }: any) {
+function AccountCard({ me, sessions, onLogout, onRevoke, onRevokeOthers, onEditProfile, status, setPasswordDraft, setSetPasswordDraft, setPasswordConfirm, setSetPasswordConfirm, onSetPassword, setPasswordStatus }: any) {
   return (
     <div className="center-card account-card">
-      <div className="avatar large">{me?.avatar ? <img src={me.avatar} alt="" /> : (me?.displayName?.[0] || me?.email?.[0] || '?').toUpperCase()}</div>
+      <div className="avatar xlarge">{me?.avatar ? <img src={me.avatar} alt="" /> : (me?.displayName?.[0] || me?.email?.[0] || '?').toUpperCase()}</div>
       <div className="card-title">{me?.displayName || me?.username || 'Профиль'}</div>
       <p>@{me?.username || 'username не задан'} · {me?.email}</p>
       {me?.bio && <p>{me.bio}</p>}
       <button className="ghost" onClick={onEditProfile}>Редактировать профиль</button>
+
+      {!me?.hasPassword && (
+        <div className="warn-box">
+          <div className="card-title">Привяжите пароль для входа</div>
+          <p>У вашего аккаунта пока нет пароля — вы вошли только по email. Задайте пароль, чтобы обезопасить аккаунт. Важно: после установки изменить пароль будет нельзя.</p>
+          <input className="input" type="password" placeholder="Новый пароль (мин. 8 символов)" value={setPasswordDraft} onChange={e => setSetPasswordDraft(e.target.value)} />
+          <input className="input" type="password" placeholder="Повторите пароль" value={setPasswordConfirm} onChange={e => setSetPasswordConfirm(e.target.value)} />
+          <button className="primary" onClick={onSetPassword}>Сохранить пароль</button>
+          {setPasswordStatus && <div className="hint">{setPasswordStatus}</div>}
+        </div>
+      )}
 
       <div className="section-title">Активные сеансы</div>
       <div className="search-list sessions-list">
@@ -327,12 +368,13 @@ function FavoritesCard({ favorites, draft, setDraft, onAdd, onRemove, onOpenProf
   );
 }
 
-function AuthCard({ email, onChange, onSubmit, hint }: any) {
+function AuthCard({ email, onChangeEmail, password, onChangePassword, onSubmit, hint }: any) {
   return (
     <div className="center-card">
       <div className="card-title">Войти или создать аккаунт</div>
-      <p>Введите вашу почту. Она будет использоваться для входа в аккаунт в будущем.</p>
-      <input className="input large" placeholder="Введите email" value={email} type="email" onChange={(e) => onChange(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onSubmit()} />
+      <p>Введите email и пароль. Если аккаунта ещё нет — он будет создан автоматически.</p>
+      <input className="input large" placeholder="Введите email" value={email} type="email" onChange={(e) => onChangeEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onSubmit()} />
+      <input className="input large" placeholder="Пароль (мин. 8 символов)" value={password} type="password" onChange={(e) => onChangePassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onSubmit()} />
       <button className="primary" onClick={onSubmit}>ПРОДОЛЖИТЬ</button>
       {hint && <div className="hint">{hint}</div>}
     </div>
@@ -356,10 +398,11 @@ function ProfileCard({ me, onSubmit, onSkip, status }: any) {
   );
 }
 
-function Messenger({ me, currentChat, message, setMessage, onSend }: any) {
+function Messenger({ me, currentChat, message, setMessage, onSend, onBack, chatOpen }: any) {
   return (
     <div className="messenger">
       <div className="chat-header">
+        {chatOpen && <button className="ghost back-btn" onClick={onBack}>← Назад</button>}
         <div className="avatar large">{currentChat.other?.avatar ? <img src={currentChat.other.avatar} alt="" /> : (currentChat.other?.displayName?.[0] || '?')}</div>
         <div><strong>{currentChat.other?.displayName || 'Выберите чат'}</strong><small>@{currentChat.other?.username || 'найдите пользователя в поиске'}</small></div>
       </div>

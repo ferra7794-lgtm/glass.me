@@ -16,8 +16,8 @@ import { authCookie, clearAuthCookie, createToken, hashCode, newVerificationCode
 import { loadDb, saveDb, withDb } from './db.js';
 import { mailEnabled, sendVerificationEmail } from './mailer.js';
 
-const PORT = Number(process.env.SERVER_PORT || 3001);
-const APP_ORIGIN = process.env.APP_ORIGIN || 'http://localhost:5173';
+const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3001);
+const APP_ORIGIN = (process.env.APP_ORIGIN || 'http://localhost:5173').trim().replace(/\/$/, '');
 const APP_NAME = process.env.APP_NAME || 'Glass Messenger';
 const TTL_MINUTES = Number(process.env.EMAIL_VERIFICATION_TTL_MINUTES || 10);
 const COOLDOWN = Number(process.env.EMAIL_RESEND_COOLDOWN_SECONDS || 60);
@@ -54,7 +54,7 @@ const profileSchema = z.object({
 
 function now() { return new Date().toISOString(); }
 function uid(prefix: string) { return `${prefix}_${nanoid(12)}`; }
-function publicUser(row: any) { return row ? ({ id: row.id, email: row.email, emailVerified: row.emailVerified, username: row.username, displayName: row.displayName, avatar: row.avatar, bio: row.bio, createdAt: row.createdAt, updatedAt: row.updatedAt }) : null; }
+function publicUser(row: any) { return row ? ({ id: row.id, email: row.email, emailVerified: row.emailVerified, username: row.username, displayName: row.displayName, avatar: row.avatar, bio: row.bio, hasPassword: !!row.passwordHash, createdAt: row.createdAt, updatedAt: row.updatedAt }) : null; }
 
 function parseDevice(ua: string) {
   const s = ua || '';
@@ -111,8 +111,9 @@ function findUserByEmail(email: string) {
 }
 
 function findUserByUsername(username: string) {
+  const lower = username.toLowerCase();
   const db = loadDb();
-  return db.users.find(u => u.username === username) || null;
+  return db.users.find(u => (u.username || '').toLowerCase() === lower) || null;
 }
 
 function ensureChat(userId: string, otherId: string) {
@@ -182,24 +183,47 @@ app.post('/api/auth/verify-code', rateLimit({ windowMs: 60_000, limit: 12 }), (r
   }
 });
 
-app.post('/api/auth/email-login', rateLimit({ windowMs: 60_000, limit: 10 }), (req, res) => {
+app.post('/api/auth/email-login', rateLimit({ windowMs: 60_000, limit: 10 }), async (req, res) => {
   try {
-    const { email } = z.object({ email: emailSchema }).parse(req.body);
+    const { email, password } = z.object({ email: emailSchema, password: z.string().min(8).max(72) }).parse(req.body);
     const normalized = email.toLowerCase();
     let user = findUserByEmail(normalized);
     if (!user) {
+      const passwordHash = await bcrypt.hash(password, 10);
       user = withDb(db => {
-        const created = { id: uid('user'), email: normalized, emailVerified: 1, username: null, displayName: null, avatar: null, bio: null, passwordHash: null, createdAt: now(), updatedAt: now() };
+        const created = { id: uid('user'), email: normalized, emailVerified: 1, username: null, displayName: null, avatar: null, bio: null, passwordHash, createdAt: now(), updatedAt: now() };
         db.users.push(created);
         return created;
       });
+    } else if (user.passwordHash) {
+      const valid = await bcrypt.compare(password, user.passwordHash);
+      if (!valid) return res.status(401).json({ error: 'Неверный пароль' });
     }
+    // Legacy accounts without a password yet are allowed to log in with any
+    // input here; they'll be prompted to attach a real password in the profile.
     const session = createSession(req, user.id);
     const token = createToken(user.id, session.id);
     authCookie(res, token);
     res.json({ ok: true, user: publicUser(user) });
   } catch (error: any) {
     res.status(400).json({ error: error?.message || 'Invalid request' });
+  }
+});
+
+app.post('/api/auth/set-password', requireAuth, async (req, res) => {
+  try {
+    const me = getCurrentUser(req as any);
+    if (me.passwordHash) return res.status(409).json({ error: 'Пароль уже задан, изменить его нельзя' });
+    const { password } = z.object({ password: z.string().min(8).max(72) }).parse(req.body);
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = withDb(db => {
+      const row = db.users.find(u => u.id === me.id);
+      Object.assign(row, { passwordHash, updatedAt: now() });
+      return row;
+    });
+    res.json({ user: publicUser(user) });
+  } catch (error: any) {
+    res.status(400).json({ error: error?.message || 'Не удалось сохранить пароль' });
   }
 });
 
