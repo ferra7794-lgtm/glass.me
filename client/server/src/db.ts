@@ -1,8 +1,17 @@
 import { createClient } from '@libsql/client';
 
+const TURSO_URL = process.env.TURSO_URL?.trim();
+const TURSO_TOKEN = process.env.TURSO_TOKEN?.trim();
+
+if (!TURSO_URL) {
+  throw new Error('TURSO_URL is not set — check your environment variables');
+}
+
+console.log('[db] connecting to', TURSO_URL.replace(/\/\/.*@/, '//<redacted>@'), 'token present:', !!TURSO_TOKEN, 'token length:', TURSO_TOKEN?.length ?? 0);
+
 const db = createClient({
-  url: process.env.TURSO_URL!,
-  authToken: process.env.TURSO_TOKEN,
+  url: TURSO_URL,
+  authToken: TURSO_TOKEN,
 });
 
 const SCHEMA_STATEMENTS = [
@@ -64,9 +73,6 @@ const SCHEMA_STATEMENTS = [
 ];
 
 export async function initDb() {
-  if (!process.env.TURSO_URL) {
-    throw new Error('TURSO_URL is not set — check your environment variables');
-  }
   for (const sql of SCHEMA_STATEMENTS) {
     try {
       await db.execute(sql);
