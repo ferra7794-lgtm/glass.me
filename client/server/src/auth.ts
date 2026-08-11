@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { nanoid } from 'nanoid';
 import type { Request, Response, NextFunction } from 'express';
-import { loadDb } from './db.js';
+import { getSession } from './db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
@@ -36,13 +36,13 @@ export function clearAuthCookie(res: Response) {
   res.clearCookie('session');
 }
 
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const token = req.cookies?.session;
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     const payload = verifyToken(token);
     if (payload.sid) {
-      const session = loadDb().sessions.find(s => s.id === payload.sid);
+      const session = await getSession(payload.sid);
       if (!session || session.revokedAt) return res.status(401).json({ error: 'Session revoked' });
     }
     (req as any).userId = payload.sub;
