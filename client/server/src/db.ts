@@ -5,64 +5,76 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    emailVerified INTEGER DEFAULT 0,
+    username TEXT UNIQUE,
+    displayName TEXT,
+    avatar TEXT,
+    bio TEXT,
+    passwordHash TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS verification_codes (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    codeHash TEXT NOT NULL,
+    expiresAt TEXT NOT NULL,
+    attempts INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    lastSentAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    userId TEXT NOT NULL,
+    device TEXT,
+    userAgent TEXT,
+    ip TEXT,
+    createdAt TEXT NOT NULL,
+    lastSeenAt TEXT NOT NULL,
+    revokedAt TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    createdAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS chat_members (
+    chatId TEXT NOT NULL,
+    userId TEXT NOT NULL,
+    PRIMARY KEY (chatId, userId)
+  )`,
+  `CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    chatId TEXT NOT NULL,
+    senderId TEXT NOT NULL,
+    text TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS favorites (
+    id TEXT PRIMARY KEY,
+    userId TEXT NOT NULL,
+    text TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`,
+];
+
 export async function initDb() {
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      emailVerified INTEGER DEFAULT 0,
-      username TEXT UNIQUE,
-      displayName TEXT,
-      avatar TEXT,
-      bio TEXT,
-      passwordHash TEXT,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS verification_codes (
-      id TEXT PRIMARY KEY,
-      email TEXT NOT NULL,
-      codeHash TEXT NOT NULL,
-      expiresAt TEXT NOT NULL,
-      attempts INTEGER DEFAULT 0,
-      createdAt TEXT NOT NULL,
-      lastSentAt TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL,
-      device TEXT,
-      userAgent TEXT,
-      ip TEXT,
-      createdAt TEXT NOT NULL,
-      lastSeenAt TEXT NOT NULL,
-      revokedAt TEXT
-    );
-    CREATE TABLE IF NOT EXISTS chats (
-      id TEXT PRIMARY KEY,
-      createdAt TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS chat_members (
-      chatId TEXT NOT NULL,
-      userId TEXT NOT NULL,
-      PRIMARY KEY (chatId, userId)
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      chatId TEXT NOT NULL,
-      senderId TEXT NOT NULL,
-      text TEXT NOT NULL,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS favorites (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL,
-      text TEXT NOT NULL,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
-    );
-  `);
+  if (!process.env.TURSO_URL) {
+    throw new Error('TURSO_URL is not set — check your environment variables');
+  }
+  for (const sql of SCHEMA_STATEMENTS) {
+    try {
+      await db.execute(sql);
+    } catch (err) {
+      console.error('Failed statement:', sql);
+      throw err;
+    }
+  }
 }
 
 // ── users ──────────────────────────────────────────────────────────────────
