@@ -62,7 +62,7 @@ export function App() {
     setCurrentChat(data);
     socketRef.current?.emit('chat:join', data.chatId);
     setStep('messenger');
-    setChats(prev => [{ id: data.chatId, createdAt: new Date().toISOString(), otherName: data.other?.displayName || data.other?.username, otherUsername: data.other?.username, lastMessage: data.messages.at(-1)?.text || '', lastAt: data.messages.at(-1)?.createdAt || new Date().toISOString() }, ...prev.filter((c: any) => c.id !== data.chatId)]);
+    setChats(prev => [{ id: data.chatId, createdAt: new Date().toISOString(), otherName: data.other?.displayName || data.other?.username, otherUsername: data.other?.username, otherAvatar: data.other?.avatar || null, lastMessage: data.messages.at(-1)?.text || '', lastAt: data.messages.at(-1)?.createdAt || new Date().toISOString() }, ...prev.filter((c: any) => c.id !== data.chatId)]);
   };
 
   const submitEmail = async () => {
@@ -196,10 +196,10 @@ export function App() {
               {chats.map((chat: any) => (
                 <button key={chat.id} className="search-item" onClick={async () => {
                   const data = await api('/api/chats/' + chat.id + '/messages');
-                  setCurrentChat({ chatId: chat.id, other: chat.otherUsername ? { id: chat.otherUsername, email: '', emailVerified: 1, username: chat.otherUsername, displayName: chat.otherName, avatar: null, bio: null, createdAt: '', updatedAt: '' } : null, messages: data.messages });
+                  setCurrentChat({ chatId: chat.id, other: chat.otherUsername ? { id: chat.otherUsername, email: '', emailVerified: 1, username: chat.otherUsername, displayName: chat.otherName, avatar: chat.otherAvatar || null, bio: null, createdAt: '', updatedAt: '' } : null, messages: data.messages });
                   socketRef.current?.emit('chat:join', chat.id);
                 }}>
-                  <span className="avatar">•</span>
+                  <span className="avatar">{chat.otherAvatar ? <img src={chat.otherAvatar} alt="" /> : (chat.otherName?.[0] || chat.otherUsername?.[0] || '?').toUpperCase()}</span>
                   <span><strong>{chat.otherName || chat.otherUsername || 'Личный чат'}</strong><small>{chat.lastMessage || 'Нет сообщений'}</small></span>
                 </button>
               ))}

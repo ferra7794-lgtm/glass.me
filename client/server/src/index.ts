@@ -268,6 +268,7 @@ app.get('/api/chats', requireAuth, async (req, res) => {
       createdAt: row.createdAt,
       otherName: other?.displayName || other?.username || 'Private chat',
       otherUsername: other?.username || null,
+      otherAvatar: other?.avatar || null,
       lastMessage: row.lastMessage || '',
       lastAt: row.lastAt || row.createdAt
     };
